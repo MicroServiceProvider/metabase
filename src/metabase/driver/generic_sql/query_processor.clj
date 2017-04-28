@@ -16,6 +16,7 @@
              [util :as qputil]]
             [metabase.util.honeysql-extensions :as hx])
   (:import clojure.lang.Keyword
+           java.util.UUID
            [metabase.query_processor.interface AgFieldRef DateTimeField DateTimeValue Expression ExpressionRef Field RelativeDateTimeValue Value]))
 
 (def ^:dynamic *query*
@@ -292,7 +293,7 @@
 
 (defn- run-query
   "Run the query itself."
-  [{sql :query, params :params, remark :remark} connection]
+  [{sql :query, params :params, remark :remark, id} connection]
   (let [sql              (str "-- " remark "\n" (hx/unescape-dots sql))
         statement        (into [sql] params)
         [columns & rows] (jdbc/query connection statement {:identifiers identity, :as-arrays? true})]
@@ -348,14 +349,36 @@
       (log/error "Failed to set timezone:\n" (with-out-str (jdbc/print-sql-exception-chain e)))
       (run-query-without-timezone driver settings connection query))))
 
-
-(defn execute-query
-  "Process and run a native (raw SQL) QUERY."
+(defn cancel-query
+  "Cancel a query by ID"
   [driver {:keys [database settings], query :native, :as outer-query}]
   (let [query (assoc query :remark (qputil/query->remark outer-query))]
     (do-with-try-catch
       (fn []
         (let [db-connection (sql/db->jdbc-connection-spec database)]
-          ((if (seq (:report-timezone settings))
-             run-query-with-timezone
-             run-query-without-timezone) driver settings db-connection query))))))
+          ( driver settings db-connection query))))))
+
+(defn execute-query
+  "Process and run a native (raw SQL) QUERY."
+  [driver {:keys [database settings], query :native, :as outer-query}]
+  (let [query-id (UUID/randomUUID)
+        query (assoc query :remark (qputil/query->remark outer-query))]
+    (swap! query-id->running-query assoc query-id query)
+    (try
+     (log/error "\n############################################ start  ############################################\n")
+     (dotimes [_ 10]
+       (Thread/sleep 1000)
+       (log/errorf "zzzzzZZZzzzzz.... %s" _))
+     (log/error "\n############################################ done  ############################################\n")
+     (let [result
+           (do-with-try-catch
+             (fn []
+               (let [db-connection (sql/db->jdbc-connection-spec database)
+                     query-result ((if (seq (:report-timezone settings))
+                                     run-query-with-timezone
+                                     run-query-without-timezone) driver settings db-connection query)]
+                 (swap! query-id->running-query dissoc query-id query)
+                 query-result)))]
+       result)
+     (finally
+       (log/error "\n############################################ I'm cleaning up ############################################\n")))))
